@@ -36,9 +36,13 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    const dedupeKey = `stripe:event:${event.id}`; 
+    console.log("Webhook event type:", event.type);
+    console.log("Webhook event id:", event.id);
 
     try {
+
+      const dedupeKey = `stripe:event:${event.id}`; 
+
       const wasSet = await redis.set(dedupeKey, "1", {
         nx: true,
         ex: 60 * 60 * 24 * 7, // 7 days
@@ -52,21 +56,33 @@ app.post(
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
-      
-          if (session.mode !== "setup") break;
-      
+          console.log("Session object:", JSON.stringify(session, null, 2));
+    
+          if (session.mode !== "setup") {
+            console.log("Skipping because mode is not setup:", session.mode);
+            break;
+          }
+    
           const setupIntentId = session.setup_intent;
           const ghlContactId = session.metadata?.ghl_contact_id || null;
-      
-          if (!setupIntentId) break;
-      
+    
+          console.log("setupIntentId:", setupIntentId);
+          console.log("ghlContactId:", ghlContactId);
+    
+          if (!setupIntentId) {
+            console.log("No setup_intent found on session");
+            break;
+          }
+    
           const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
             expand: ["payment_method"],
           });
-      
+    
+          console.log("Retrieved setupIntent:", JSON.stringify(setupIntent, null, 2));
+    
           const customerId = setupIntent.customer;
           const paymentMethod = setupIntent.payment_method;
-      
+    
           const payload = {
             stripe_customer_id: customerId,
             stripe_payment_method_id: paymentMethod?.id || "",
@@ -75,50 +91,22 @@ app.post(
             card_brand: paymentMethod?.card?.brand || "",
             card_last4: paymentMethod?.card?.last4 || "",
           };
-      
+    
+          console.log("Payload to GHL:", payload);
+    
           if (ghlContactId) {
-            await updateHighLevelContact(ghlContactId, payload);
+            const result = await updateHighLevelContact(ghlContactId, payload);
+            console.log("GHL update result:", result);
+          } else {
+            console.log("No ghlContactId found");
           }
-      
+    
           break;
         }
-      
-        case "payment_intent.succeeded": {
-          const pi = event.data.object;
-          const ghlContactId = pi.metadata?.ghl_contact_id || null;
-      
-          if (ghlContactId) {
-            await updateHighLevelContact(ghlContactId, {
-              last_stripe_payment_intent_id: pi.id,
-              last_payment_status: pi.status,
-              last_payment_error: "",
-              last_payment_amount: String(pi.amount),
-            });
-          }
-      
-          break;
-        }
-      
-        case "payment_intent.payment_failed": {
-          const pi = event.data.object;
-          const ghlContactId = pi.metadata?.ghl_contact_id || null;
-          const message = pi.last_payment_error?.message || "Payment failed";
-      
-          if (ghlContactId) {
-            await updateHighLevelContact(ghlContactId, {
-              last_stripe_payment_intent_id: pi.id,
-              last_payment_status: "failed",
-              last_payment_error: message,
-              last_payment_amount: String(pi.amount || ""),
-            });
-          }
-      
-          break;
-        }
-      
-        default:
-          console.log(`Unhandled event type: ${event.type}`);
-      }
+
+    default:
+      console.log(`Unhandled event type: ${event.type}`);
+  }
 
       res.json({ received: true });
     } catch (err) {
