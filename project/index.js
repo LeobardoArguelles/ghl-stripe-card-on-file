@@ -36,9 +36,6 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    console.log("Webhook event type:", event.type);
-    console.log("Webhook event id:", event.id);
-
     try {
 
       const dedupeKey = `stripe:event:${event.id}`; 
@@ -56,7 +53,6 @@ app.post(
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
-          console.log("Session object:", JSON.stringify(session, null, 2));
     
           if (session.mode !== "setup") {
             console.log("Skipping because mode is not setup:", session.mode);
@@ -66,9 +62,6 @@ app.post(
           const setupIntentId = session.setup_intent;
           const ghlContactId = session.metadata?.ghl_contact_id || null;
     
-          console.log("setupIntentId:", setupIntentId);
-          console.log("ghlContactId:", ghlContactId);
-    
           if (!setupIntentId) {
             console.log("No setup_intent found on session");
             break;
@@ -77,8 +70,6 @@ app.post(
           const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
             expand: ["payment_method"],
           });
-    
-          console.log("Retrieved setupIntent:", JSON.stringify(setupIntent, null, 2));
     
           const customerId = setupIntent.customer;
           const paymentMethod = setupIntent.payment_method;
@@ -92,11 +83,11 @@ app.post(
             card_last4: paymentMethod?.card?.last4 || "",
           };
     
-          console.log("Payload to GHL:", payload);
+          // console.log("Payload to GHL:", payload);
     
           if (ghlContactId) {
             const result = await updateHighLevelContact(ghlContactId, payload);
-            console.log("GHL update result:", result);
+            // console.log("GHL update result:", result);
           } else {
             console.log("No ghlContactId found");
           }
@@ -364,7 +355,7 @@ async function updateHighLevelContact(ghlContactId, fields) {
     throw new Error(data.message || "Failed to update GHL contact");
   }
 
-  console.log("GHL contact updated:", data);
+  // console.log("GHL contact updated:", data);
   return data;
 }
 
@@ -476,15 +467,5 @@ async function getHighLevelContactPaymentData(ghlContactId) {
     stripe_setup_status: getFieldValue(GHL_FIELD_IDS.stripe_setup_status),
   };
 }
-
-app.get("/debug-redis", async (req, res) => {
-  const key = "debug:test";
-  const before = await redis.get(key);
-  const set1 = await redis.set(key, "1", { nx: true, ex: 300 });
-  const after = await redis.get(key);
-  const set2 = await redis.set(key, "1", { nx: true, ex: 300 });
-
-  res.json({ before, set1, after, set2 });
-});
 
 module.exports = app;
