@@ -1,4 +1,10 @@
 require("dotenv").config();
+const { Redis } = require("@upstash/redis");
+
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 const express = require("express");
 const cors = require("cors");
@@ -30,7 +36,19 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
+    const dedupeKey = `stripe:event:${event.id}`; 
+
     try {
+      const wasSet = await redis.set(dedupeKey, "1", {
+        nx: true,
+        ex: 60 * 60 * 24 * 7, // 7 days
+      });
+      
+      if (!wasSet) {
+        console.log("Duplicate webhook ignored:", event.id);
+        return res.json({ received: true, duplicate: true });
+      }
+
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
