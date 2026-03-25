@@ -367,15 +367,6 @@ async function updateHighLevelContact(ghlContactId, fields) {
   console.log("GHL contact updated:", data);
   return data;
 }
-async function getHighLevelContactPaymentData(ghlContactId) {
-  // Replace this with real HighLevel contact fetch logic
-  console.log("Pretend fetching GHL contact payment data:", ghlContactId);
-
-  return {
-    stripe_customer_id: null,
-    stripe_payment_method_id: null,
-  };
-}
 
 app.get("/start-card-setup", async (req, res) => {
   try {
