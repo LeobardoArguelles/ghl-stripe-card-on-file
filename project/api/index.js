@@ -486,4 +486,14 @@ async function getHighLevelContactPaymentData(ghlContactId) {
   };
 }
 
+app.get("/debug-redis", async (req, res) => {
+  const key = "debug:test";
+  const before = await redis.get(key);
+  const set1 = await redis.set(key, "1", { nx: true, ex: 300 });
+  const after = await redis.get(key);
+  const set2 = await redis.set(key, "1", { nx: true, ex: 300 });
+
+  res.json({ before, set1, after, set2 });
+});
+
 module.exports = app;
