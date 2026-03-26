@@ -196,7 +196,7 @@ async function updateHighLevelContact(ghlContactId, fields) {
 
 app.post("/start-card-setup", async (req, res) => {
   try {
-    const { name, last_name, email, whatsapp, consent, consent_text_version } = req.body;
+    const { name, last_name, email, whatsapp, country_code, consent, consent_text_version } = req.body;
 
     if (!consent) {
       return res.status(400).json({
@@ -210,7 +210,8 @@ app.post("/start-card-setup", async (req, res) => {
       });
     }
 
-    const normalizedPhone = normalizePhone(whatsapp);
+    const fullPhone = `${country_code || ""}${whatsapp || ""}`;
+    const normalizedPhone = normalizePhone(fullPhone);
 
     // 1) Upsert contact in GHL
     const contact = await upsertHighLevelContact({
