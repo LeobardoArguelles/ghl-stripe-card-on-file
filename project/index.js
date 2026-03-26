@@ -253,6 +253,7 @@ app.post("/start-card-setup", async (req, res) => {
       mode: "setup",
       customer: customerId,
       currency: "usd",
+      locale: "es-419",
       success_url: process.env.SUCCESS_URL,
       cancel_url: process.env.CANCEL_URL,
       metadata: {
