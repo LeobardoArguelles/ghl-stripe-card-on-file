@@ -99,6 +99,15 @@ app.post(
     
           if (ghlContactId) {
             const result = await updateHighLevelContact(ghlContactId, payload);
+            try {
+              await upsertHighLevelOpportunity({
+                contactId: ghlContactId,
+                pipelineId = process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+                pipelineStageId = process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID,
+              });
+            } catch (oppErr) {
+              console.error("Opportunity update failed:", oppErr);
+            }
             // console.log("GHL update result:", result);
           } else {
             console.log("No ghlContactId found");
@@ -533,8 +542,11 @@ app.get("/start-checkout", async (req, res) => {
 
 async function upsertHighLevelOpportunity({
   contactId,
-  firstName,
-  lastName,
+  firstName = "",
+  lastName = "",
+  pipelineId = process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+  pipelineStageId = process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
+  status = "open",
   source = "custom_form"
 }) {
   const response = await fetch(
@@ -550,11 +562,10 @@ async function upsertHighLevelOpportunity({
       body: JSON.stringify({
         locationId: process.env.GHL_LOCATION_ID,
         contactId,
-        pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
-        pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
-        status: process.env.GHL_WA_BOT_WEBINAR_STATUS || "open",
-        name:
-          `${firstName || ""} ${lastName || ""}`.trim() || "New Lead"
+        pipelineId: pipelineId,
+        pipelineStageId: pipelineStageId,
+        status: status,
+        name: `${firstName || ""} ${lastName || ""}`.trim() || "New Lead"
       }),
     }
   );
