@@ -547,6 +547,20 @@ async function upsertHighLevelOpportunity({
   status = "open",
   source = "custom_form"
 }) {
+  const body = {
+    locationId: process.env.GHL_LOCATION_ID,
+    contactId,
+    pipelineId,
+    pipelineStageId,
+    status,
+    source,
+  };
+
+  // only add name if provided
+  if (opportunityName && opportunityName.trim()) {
+    body.name = opportunityName.trim();
+  }
+
   const response = await fetch(
     "https://services.leadconnectorhq.com/opportunities/upsert",
     {
@@ -557,14 +571,7 @@ async function upsertHighLevelOpportunity({
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({
-        locationId: process.env.GHL_LOCATION_ID,
-        contactId,
-        pipelineId: pipelineId,
-        pipelineStageId: pipelineStageId,
-        status: status,
-        name: opportunityName
-      }),
+      body: JSON.stringify(body),
     }
   );
 
