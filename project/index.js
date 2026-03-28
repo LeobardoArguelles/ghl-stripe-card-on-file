@@ -102,6 +102,7 @@ app.post(
     const sig = req.headers["stripe-signature"];
 
     let event;
+    console.log('webhook triggered');
 
     try {
       event = stripe.webhooks.constructEvent(
@@ -113,6 +114,7 @@ app.post(
       console.error("Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
+    console.log('event', event);
 
     try {
 
