@@ -442,46 +442,76 @@ app.get("/start-checkout", async (req, res) => {
   try {
     const {
       customer_id,
+      contact_id,
       price_id,
       quantity = "1",
       success_url,
       cancel_url,
-      client_reference_id,
       locale,
+      email,
     } = req.query;
-
-    if (!customer_id) {
-      return res.status(400).send("Missing customer_id");
-    }
 
     if (!price_id) {
       return res.status(400).send("Missing price_id");
     }
 
     const parsedQuantity = parseInt(quantity, 10);
-
     if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1) {
       return res.status(400).send("quantity must be an integer >= 1");
     }
 
-    const session = await stripe.checkout.sessions.create({
+    const finalSuccessUrl = success_url || process.env.PAYMENT_SUCCESS_URL;
+    const finalCancelUrl = cancel_url || process.env.PAYMENT_CANCEL_URL;
+
+    if (!finalSuccessUrl || !finalCancelUrl) {
+      return res.status(400).send("Missing success_url or cancel_url");
+    }
+
+    const metadata = {
+      source: "ghl",
+      price_id,
+    };
+
+    if (contact_id) {
+      metadata.contact_id = String(contact_id);
+    }
+
+    const sessionParams = {
       mode: "payment",
-      customer: customer_id,
       line_items: [
         {
           price: price_id,
           quantity: parsedQuantity,
         },
       ],
-      success_url: success_url || process.env.PAYMENT_SUCCESS_URL,
-      cancel_url: cancel_url || process.env.PAYMENT_CANCEL_URL,
-      client_reference_id: client_reference_id || undefined,
+      success_url: finalSuccessUrl,
+      cancel_url: finalCancelUrl,
       locale: locale || undefined,
-      metadata: {
-        source: "ghl",
-        client_reference_id: client_reference_id || "",
-      },
-    });
+      metadata,
+    };
+
+    // Best case: existing Stripe customer
+    if (customer_id) {
+      sessionParams.customer = String(customer_id);
+
+      if (contact_id) {
+        sessionParams.client_reference_id = String(contact_id);
+      }
+    } else {
+      // Fallback: still create a valid Checkout Session
+      sessionParams.customer_creation = "always";
+
+      // Optional: prefill email if you have it from GHL/URL params
+      if (email) {
+        sessionParams.customer_email = String(email);
+      }
+
+      if (contact_id) {
+        sessionParams.client_reference_id = String(contact_id);
+      }
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     return res.redirect(303, session.url);
   } catch (err) {
