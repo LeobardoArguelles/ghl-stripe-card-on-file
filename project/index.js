@@ -100,12 +100,10 @@ app.post(
           if (ghlContactId) {
             const result = await updateHighLevelContact(ghlContactId, payload);
             try {
-	      pipelineId = process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID;
-	      pipelineStageId = process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID;
               await upsertHighLevelOpportunity({
                 contactId: ghlContactId,
-                pipelineId = pipelineId,
-                pipelineStageId = pipelineStageId,
+                pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+                pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID,
               });
             } catch (oppErr) {
               console.error("Opportunity update failed:", oppErr);
