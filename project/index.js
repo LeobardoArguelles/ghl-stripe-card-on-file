@@ -395,7 +395,7 @@ app.post("/start-card-setup", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "setup",
       customer: customerId,
-      currency: "usd",
+      currency: "mxn",
       locale: "es-419",
       success_url: process.env.SUCCESS_URL,
       cancel_url: process.env.CANCEL_URL,
@@ -492,6 +492,7 @@ app.get("/start-card-setup-recovery", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "setup",
       customer: customerId,
+      currency: "mxn",
       locale: locale || "es-419",
       success_url: finalSuccessUrl,
       cancel_url: finalCancelUrl,
