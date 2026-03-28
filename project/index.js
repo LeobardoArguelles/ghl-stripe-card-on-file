@@ -434,6 +434,113 @@ app.post("/start-card-setup", async (req, res) => {
   }
 });
 
+app.get("/start-card-setup-recovery", async (req, res) => {
+  try {
+    const {
+      contact_id,
+      success_url,
+      cancel_url,
+      locale,
+      consent_text_version,
+    } = req.query;
+
+    if (!contact_id) {
+      return res.status(400).send("Missing contact_id");
+    }
+
+    const finalSuccessUrl = success_url || process.env.SUCCESS_URL;
+    const finalCancelUrl = cancel_url || process.env.CANCEL_URL;
+
+    if (!finalSuccessUrl || !finalCancelUrl) {
+      return res.status(400).send("Missing success_url or cancel_url");
+    }
+
+    // 1) Fetch contact from GHL
+    const ghlContact = await getHighLevelContact(contact_id);
+
+    if (!ghlContact?.id) {
+      return res.status(404).send("GHL contact not found");
+    }
+
+    const firstName = ghlContact.firstName || "";
+    const lastName = ghlContact.lastName || "";
+    const email = ghlContact.email || "";
+    const phone = normalizePhone(ghlContact.phone || "");
+
+    // 2) Get existing Stripe data from GHL custom fields
+    const contactPaymentData = await getHighLevelContactPaymentData(ghlContact.id);
+    let customerId = contactPaymentData.stripe_customer_id || null;
+
+    // 3) Create Stripe customer only if missing
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: email || undefined,
+        name: `${firstName} ${lastName}`.trim() || undefined,
+        phone: phone || undefined,
+        metadata: {
+          ghl_contact_id: ghlContact.id,
+          source: "gohighlevel_recovery",
+        },
+      });
+
+      customerId = customer.id;
+    }
+
+    // 4) Create setup checkout session
+    const consentTimestamp = new Date().toISOString();
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "setup",
+      customer: customerId,
+      locale: locale || "es-419",
+      success_url: finalSuccessUrl,
+      cancel_url: finalCancelUrl,
+      metadata: {
+        ghl_contact_id: ghlContact.id,
+        source: "gohighlevel_recovery",
+        purpose: "save_card_for_future_charge",
+        consent: "true",
+        consent_text_version: consent_text_version || "recovery_v1",
+        consent_timestamp: consentTimestamp,
+      },
+      setup_intent_data: {
+        metadata: {
+          ghl_contact_id: ghlContact.id,
+          source: "gohighlevel_recovery",
+        },
+      },
+    });
+
+    // 5) Update GHL contact immediately
+    await updateHighLevelContact(ghlContact.id, {
+      stripe_customer_id: customerId,
+      stripe_setup_status: "pending",
+      consent_given: "true",
+      consent_timestamp: consentTimestamp,
+      consent_version: consent_text_version || "recovery_v1",
+    });
+
+    // 6) Optional: move opportunity back into the right stage
+    try {
+      await upsertHighLevelOpportunity({
+        contactId: ghlContact.id,
+        pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+        pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_RECOVERY_STAGE_ID,
+        opportunityName:
+          `${firstName || ""} ${lastName || ""}`.trim() || "Recovery Lead",
+      });
+    } catch (oppErr) {
+      console.error("Opportunity update failed in recovery flow:", oppErr);
+    }
+
+    // 7) Redirect to Stripe
+    return res.redirect(303, session.url);
+  } catch (err) {
+    console.error("Error in /start-card-setup-recovery:", err);
+    return res.status(500).send(err.message || "Failed to start recovery card setup flow");
+  }
+});
+
 app.get("/ghl/custom-fields", async (req, res) => {
   try {
     const response = await fetch(
@@ -455,6 +562,29 @@ app.get("/ghl/custom-fields", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+async function getHighLevelContact(ghlContactId) {
+  const response = await fetch(
+    `https://services.leadconnectorhq.com/contacts/${ghlContactId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.GHL_API_KEY}`,
+        Version: "2021-07-28",
+        Accept: "application/json",
+      },
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("Failed to fetch GHL contact:", data);
+    throw new Error(data.message || "Failed to fetch GHL contact");
+  }
+
+  return data.contact || data;
+}
 
 async function getHighLevelContactPaymentData(ghlContactId) {
   const response = await fetch(
