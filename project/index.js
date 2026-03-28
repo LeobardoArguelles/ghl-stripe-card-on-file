@@ -383,5 +383,59 @@ async function upsertHighLevelContact({ firstName, lastName, email, phone }) {
   return contact;
 }
 
+app.post("/create-payment-checkout-session", async (req, res) => {
+  try {
+    const {
+      customer_id,
+      price_id,
+      quantity = 1,
+      success_url,
+      cancel_url,
+      client_reference_id,
+      metadata = {},
+      allow_promotion_codes = false,
+      locale,
+    } = req.body;
+
+    if (!customer_id) {
+      return res.status(400).json({ error: "customer_id is required" });
+    }
+
+    if (!price_id) {
+      return res.status(400).json({ error: "price_id is required" });
+    }
+
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      return res.status(400).json({ error: "quantity must be an integer >= 1" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer: customer_id,
+      line_items: [
+        {
+          price: price_id,
+          quantity,
+        },
+      ],
+      success_url: success_url || process.env.PAYMENT_SUCCESS_URL,
+      cancel_url: cancel_url || process.env.PAYMENT_CANCEL_URL,
+      client_reference_id: client_reference_id || undefined,
+      metadata,
+      allow_promotion_codes,
+      locale: locale || undefined,
+    });
+
+    return res.json({
+      session_id: session.id,
+      url: session.url,
+    });
+  } catch (err) {
+    console.error("Error creating payment checkout session:", err);
+    return res.status(500).json({
+      error: err.message || "Failed to create payment checkout session",
+    });
+  }
+});
 
 module.exports = app;
