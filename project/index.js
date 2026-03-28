@@ -240,7 +240,7 @@ app.post("/start-card-setup", async (req, res) => {
     try {
       await upsertHighLevelOpportunity({
         contactId: ghlContactId,
-	opportunityName: `${name || ""} ${lastName || ""}`.trim() || "New Lead",
+	opportunityName: `${name || ""} ${last_name || ""}`.trim() || "New Lead",
       });
     } catch (oppErr) {
       console.error("Opportunity creation failed:", oppErr);
