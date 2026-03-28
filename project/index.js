@@ -16,6 +16,77 @@ function normalizePhone(phone) {
   return String(phone).replace(/[^\d+]/g, "").trim();
 }
 
+function formatStripeAmount(amount, currency) {
+  if (amount === undefined || amount === null) return "";
+  return String(amount); // store raw minor-unit value in GHL
+}
+
+async function handleSuccessfulPaymentSession(session) {
+  const ghlContactId =
+    session.metadata?.ghl_contact_id ||
+    session.metadata?.contact_id ||
+    session.client_reference_id ||
+    null;
+
+  if (!ghlContactId) {
+    console.log("No ghlContactId found for payment session:", session.id);
+    return;
+  }
+
+  const payload = {
+    last_stripe_payment_intent_id: session.payment_intent || "",
+    last_payment_status: session.payment_status || "paid",
+    last_payment_error: "",
+    last_payment_amount: formatStripeAmount(session.amount_total, session.currency),
+  };
+
+  await updateHighLevelContact(ghlContactId, payload);
+
+  try {
+    await upsertHighLevelOpportunity({
+      contactId: ghlContactId,
+      pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+      pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_PAID_STAGE_ID,
+      status: "won",
+    });
+  } catch (oppErr) {
+    console.error("Opportunity update failed after payment:", oppErr);
+  }
+}
+
+async function handleFailedPaymentSession(session, errorMessage = "") {
+  const ghlContactId =
+    session.metadata?.ghl_contact_id ||
+    session.metadata?.contact_id ||
+    session.client_reference_id ||
+    null;
+
+  if (!ghlContactId) {
+    console.log("No ghlContactId found for failed payment session:", session.id);
+    return;
+  }
+
+  const payload = {
+    last_stripe_payment_intent_id: session.payment_intent || "",
+    last_payment_status: session.payment_status || "failed",
+    last_payment_error: errorMessage || "Payment failed",
+    last_payment_amount: formatStripeAmount(session.amount_total, session.currency),
+  };
+
+  await updateHighLevelContact(ghlContactId, payload);
+
+  try {
+    await upsertHighLevelOpportunity({
+      contactId: ghlContactId,
+      pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+      pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_PAYMENT_FAILED_STAGE_ID,
+      status: "open",
+    });
+  } catch (oppErr) {
+    console.error("Opportunity update failed after payment failure:", oppErr);
+  }
+}
+
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -65,60 +136,110 @@ app.post(
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
-    
-          if (session.mode !== "setup") {
-            console.log("Skipping because mode is not setup:", session.mode);
-            break;
-          }
-    
-          const setupIntentId = session.setup_intent;
-          const ghlContactId = session.metadata?.ghl_contact_id || null;
-    
-          if (!setupIntentId) {
-            console.log("No setup_intent found on session");
-            break;
-          }
-    
-          const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
-            expand: ["payment_method"],
-          });
-    
-          const customerId = setupIntent.customer;
-          const paymentMethod = setupIntent.payment_method;
-    
-          const payload = {
-            stripe_customer_id: customerId,
-            stripe_payment_method_id: paymentMethod?.id || "",
-            stripe_setup_intent_id: setupIntent.id,
-            stripe_setup_status: "ready",
-            card_brand: paymentMethod?.card?.brand || "",
-            card_last4: paymentMethod?.card?.last4 || "",
-          };
-    
-          // console.log("Payload to GHL:", payload);
-    
-          if (ghlContactId) {
-            const result = await updateHighLevelContact(ghlContactId, payload);
-            try {
-              await upsertHighLevelOpportunity({
-                contactId: ghlContactId,
-                pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
-                pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID,
-              });
-            } catch (oppErr) {
-              console.error("Opportunity update failed:", oppErr);
+      
+          if (session.mode === "setup") {
+            const setupIntentId = session.setup_intent;
+            const ghlContactId = session.metadata?.ghl_contact_id || null;
+      
+            if (!setupIntentId) {
+              console.log("No setup_intent found on session");
+              break;
             }
-            // console.log("GHL update result:", result);
-          } else {
-            console.log("No ghlContactId found");
+      
+            const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
+              expand: ["payment_method"],
+            });
+      
+            const customerId = setupIntent.customer;
+            const paymentMethod = setupIntent.payment_method;
+      
+            const payload = {
+              stripe_customer_id: customerId,
+              stripe_payment_method_id: paymentMethod?.id || "",
+              stripe_setup_intent_id: setupIntent.id,
+              stripe_setup_status: "ready",
+              card_brand: paymentMethod?.card?.brand || "",
+              card_last4: paymentMethod?.card?.last4 || "",
+            };
+      
+            if (ghlContactId) {
+              await updateHighLevelContact(ghlContactId, payload);
+      
+              try {
+                await upsertHighLevelOpportunity({
+                  contactId: ghlContactId,
+                  pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+                  pipelineStageId:
+                    process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID,
+                });
+              } catch (oppErr) {
+                console.error("Opportunity update failed:", oppErr);
+              }
+            } else {
+              console.log("No ghlContactId found");
+            }
+      
+            break;
           }
-    
+      
+          if (session.mode === "payment") {
+            await handleSuccessfulPaymentSession(session);
+            break;
+          }
+      
+          console.log("Unhandled checkout.session.completed mode:", session.mode);
+          break;
+        }
+      
+        case "checkout.session.async_payment_succeeded": {
+          const session = event.data.object;
+          await handleSuccessfulPaymentSession(session);
+          break;
+        }
+      
+        case "checkout.session.async_payment_failed": {
+          const session = event.data.object;
+          await handleFailedPaymentSession(session, "Async payment failed");
           break;
         }
 
-    default:
-      console.log(`Unhandled event type: ${event.type}`);
-  }
+	case "payment_intent.payment_failed": {
+          const pi = event.data.object;
+        
+          const ghlContactId =
+            pi.metadata?.ghl_contact_id ||
+            pi.metadata?.contact_id ||
+            null;
+        
+          if (!ghlContactId) {
+            console.log("No ghlContactId found for failed PaymentIntent:", pi.id);
+            break;
+          }
+        
+          await updateHighLevelContact(ghlContactId, {
+            last_stripe_payment_intent_id: pi.id || "",
+            last_payment_status: pi.status || "failed",
+            last_payment_error: pi.last_payment_error?.message || "Payment failed",
+            last_payment_amount: pi.amount ?? "",
+          });
+        
+          try {
+            await upsertHighLevelOpportunity({
+              contactId: ghlContactId,
+              pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+              pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_PAYMENT_FAILED_STAGE_ID,
+              status: "open",
+            });
+          } catch (oppErr) {
+            console.error("Opportunity update failed after PI failure:", oppErr);
+          }
+        
+          break;
+        }
+      
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
+      }
 
       await redis.set(dedupeKey, "done", {
         ex: 60 * 60 * 24 * 7,
@@ -468,6 +589,7 @@ app.get("/start-checkout", async (req, res) => {
       cancel_url,
       locale,
       email,
+      opportunity_id, // optional if you have it
     } = req.query;
 
     if (!price_id) {
@@ -488,11 +610,15 @@ app.get("/start-checkout", async (req, res) => {
 
     const metadata = {
       source: "ghl",
-      price_id,
+      price_id: String(price_id),
     };
 
     if (contact_id) {
-      metadata.contact_id = String(contact_id);
+      metadata.ghl_contact_id = String(contact_id);
+    }
+
+    if (opportunity_id) {
+      metadata.ghl_opportunity_id = String(opportunity_id);
     }
 
     const sessionParams = {
@@ -507,27 +633,23 @@ app.get("/start-checkout", async (req, res) => {
       cancel_url: finalCancelUrl,
       locale: locale || undefined,
       metadata,
+      payment_intent_data: {
+        metadata,
+      },
     };
 
-    // Best case: existing Stripe customer
     if (customer_id) {
       sessionParams.customer = String(customer_id);
-
-      if (contact_id) {
-        sessionParams.client_reference_id = String(contact_id);
-      }
     } else {
-      // Fallback: still create a valid Checkout Session
       sessionParams.customer_creation = "always";
 
-      // Optional: prefill email if you have it from GHL/URL params
       if (email) {
         sessionParams.customer_email = String(email);
       }
+    }
 
-      if (contact_id) {
-        sessionParams.client_reference_id = String(contact_id);
-      }
+    if (contact_id) {
+      sessionParams.client_reference_id = String(contact_id);
     }
 
     const session = await stripe.checkout.sessions.create(sessionParams);
