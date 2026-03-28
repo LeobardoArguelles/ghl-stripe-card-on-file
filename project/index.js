@@ -240,8 +240,7 @@ app.post("/start-card-setup", async (req, res) => {
     try {
       await upsertHighLevelOpportunity({
         contactId: ghlContactId,
-        firstName: name,
-        lastName: last_name
+	opportunityName: `${firstName || ""} ${lastName || ""}`.trim() || "New Lead",
       });
     } catch (oppErr) {
       console.error("Opportunity creation failed:", oppErr);
@@ -542,8 +541,7 @@ app.get("/start-checkout", async (req, res) => {
 
 async function upsertHighLevelOpportunity({
   contactId,
-  firstName = "",
-  lastName = "",
+  opportunityName,
   pipelineId = process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
   pipelineStageId = process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
   status = "open",
@@ -565,7 +563,7 @@ async function upsertHighLevelOpportunity({
         pipelineId: pipelineId,
         pipelineStageId: pipelineStageId,
         status: status,
-        name: `${firstName || ""} ${lastName || ""}`.trim() || "New Lead"
+        name: opportunityName
       }),
     }
   );
