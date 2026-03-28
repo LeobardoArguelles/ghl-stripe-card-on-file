@@ -438,4 +438,56 @@ app.post("/create-payment-checkout-session", async (req, res) => {
   }
 });
 
+app.get("/start-checkout", async (req, res) => {
+  try {
+    const {
+      customer_id,
+      price_id,
+      quantity = "1",
+      success_url,
+      cancel_url,
+      client_reference_id,
+      locale,
+    } = req.query;
+
+    if (!customer_id) {
+      return res.status(400).send("Missing customer_id");
+    }
+
+    if (!price_id) {
+      return res.status(400).send("Missing price_id");
+    }
+
+    const parsedQuantity = parseInt(quantity, 10);
+
+    if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1) {
+      return res.status(400).send("quantity must be an integer >= 1");
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer: customer_id,
+      line_items: [
+        {
+          price: price_id,
+          quantity: parsedQuantity,
+        },
+      ],
+      success_url: success_url || process.env.PAYMENT_SUCCESS_URL,
+      cancel_url: cancel_url || process.env.PAYMENT_CANCEL_URL,
+      client_reference_id: client_reference_id || undefined,
+      locale: locale || undefined,
+      metadata: {
+        source: "ghl",
+        client_reference_id: client_reference_id || "",
+      },
+    });
+
+    return res.redirect(303, session.url);
+  } catch (err) {
+    console.error("Error in /start-checkout:", err);
+    return res.status(500).send("Failed to create checkout session");
+  }
+});
+
 module.exports = app;
