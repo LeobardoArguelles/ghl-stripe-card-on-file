@@ -227,6 +227,20 @@ app.post("/start-card-setup", async (req, res) => {
       throw new Error("GHL upsert did not return a contact ID");
     }
 
+    // 1.5) Add/update opportunity in pipeline
+    try {
+      await upsertHighLevelOpportunity({
+        contactId: ghlContactId,
+        firstName: name,
+        lastName: last_name,
+        email,
+        phone: normalizedPhone,
+        source: "card_setup_form",
+      });
+    } catch (oppErr) {
+      console.error("Opportunity creation failed:", oppErr);
+    }
+
     // 2) Try to get existing Stripe customer from GHL
     const contactPaymentData = await getHighLevelContactPaymentData(ghlContactId);
     let customerId = contactPaymentData.stripe_customer_id || null;
@@ -519,5 +533,52 @@ app.get("/start-checkout", async (req, res) => {
     return res.status(500).send("Failed to create checkout session");
   }
 });
+
+async function upsertHighLevelOpportunity({
+  contactId,
+  firstName,
+  lastName,
+  email,
+  phone,
+  source = "custom_form",
+}) {
+  const response = await fetch(
+    "https://services.leadconnectorhq.com/opportunities/upsert",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.GHL_API_KEY}`,
+        Version: "2021-07-28",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        locationId: process.env.GHL_LOCATION_ID,
+        contactId,
+        pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
+        pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
+        status: process.env.GHL_WA_BOT_WEBINAR_STATUS || "open",
+        name:
+          `${firstName || ""} ${lastName || ""}`.trim() ||
+          email ||
+          phone ||
+          "New Lead",
+        source,
+        contactName: `${firstName || ""} ${lastName || ""}`.trim() || undefined,
+        email: email || undefined,
+        phone: phone || undefined,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("GHL opportunity upsert failed:", data);
+    throw new Error(data.message || "Failed to upsert GHL opportunity");
+  }
+
+  return data.opportunity || data;
+}
 
 module.exports = app;
