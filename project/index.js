@@ -232,10 +232,7 @@ app.post("/start-card-setup", async (req, res) => {
       await upsertHighLevelOpportunity({
         contactId: ghlContactId,
         firstName: name,
-        lastName: last_name,
-        email,
-        phone: normalizedPhone,
-        source: "card_setup_form",
+        lastName: last_name
       });
     } catch (oppErr) {
       console.error("Opportunity creation failed:", oppErr);
@@ -538,9 +535,7 @@ async function upsertHighLevelOpportunity({
   contactId,
   firstName,
   lastName,
-  email,
-  phone,
-  source = "custom_form",
+  source = "custom_form"
 }) {
   const response = await fetch(
     "https://services.leadconnectorhq.com/opportunities/upsert",
@@ -559,14 +554,7 @@ async function upsertHighLevelOpportunity({
         pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
         status: process.env.GHL_WA_BOT_WEBINAR_STATUS || "open",
         name:
-          `${firstName || ""} ${lastName || ""}`.trim() ||
-          email ||
-          phone ||
-          "New Lead",
-        source,
-        contactName: `${firstName || ""} ${lastName || ""}`.trim() || undefined,
-        email: email || undefined,
-        phone: phone || undefined,
+          `${firstName || ""} ${lastName || ""}`.trim() || "New Lead"
       }),
     }
   );
