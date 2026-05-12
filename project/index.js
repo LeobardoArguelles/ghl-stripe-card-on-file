@@ -116,6 +116,8 @@ app.post(
     }
     console.log('event', event);
 
+    let dedupeKey;
+
     try {
 
       const dedupeKey = `stripe:event:${event.id}`; 
