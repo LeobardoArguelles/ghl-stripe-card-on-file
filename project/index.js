@@ -44,6 +44,27 @@ function isRetryableNetworkError(err) {
     NETWORK_RETRYABLE_ERROR_CODES.has(err?.code);
 }
 
+function serializeError(err) {
+  if (!err) {
+    return null;
+  }
+
+  return {
+    name: err.name || null,
+    message: err.message || null,
+    code: err.code || null,
+    status: err.status || null,
+    stack: err.stack || null,
+    cause: err.cause ? {
+      name: err.cause.name || null,
+      message: err.cause.message || null,
+      code: err.cause.code || null,
+      stack: err.cause.stack || null,
+    } : null,
+    data: err.data || null,
+  };
+}
+
 async function parseResponseBody(response) {
   const rawBody = await response.text();
 
@@ -116,10 +137,7 @@ async function fetchJsonWithRetry(url, options = {}, config = {}) {
 
   console.error(`${operation} failed`, {
     url,
-    message: lastError?.message,
-    status: lastError?.status || null,
-    cause: lastError?.cause?.code || lastError?.code || null,
-    data: lastError?.data || null,
+    error: serializeError(lastError),
   });
 
   throw lastError;
@@ -213,6 +231,10 @@ app.post(
         sig,
         process.env.STRIPE_WEBHOOK_SECRET
       );
+      console.log("webhook event constructed", {
+        id: event.id,
+        type: event.type,
+      });
     } catch (err) {
       console.error("Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -221,17 +243,21 @@ app.post(
 
     try {
       dedupeKey = `stripe:event:${event.id}`;
+      console.log("webhook dedupe lookup start", { dedupeKey });
       const existingStatus = await redis.get(dedupeKey);
+      console.log("webhook dedupe lookup done", { dedupeKey, existingStatus });
 
       if (existingStatus === "done") {
         console.log("Duplicate webhook ignored:", event.id);
         return res.json({ received: true, duplicate: true });
       }
 
+      console.log("webhook dedupe lock start", { dedupeKey });
       const lockSet = await redis.set(dedupeKey, "processing", {
         nx: true,
         ex: 60 * 10,
       });
+      console.log("webhook dedupe lock done", { dedupeKey, lockSet });
       
       if (!lockSet && existingStatus === "processing") {
         console.log("Webhook already processing:", event.id);
@@ -241,6 +267,12 @@ app.post(
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
+          console.log("processing checkout.session.completed", {
+            sessionId: session.id,
+            mode: session.mode,
+            ghlContactId: session.metadata?.ghl_contact_id || null,
+            setupIntentId: session.setup_intent || null,
+          });
       
           if (session.mode === "setup") {
             const setupIntentId = session.setup_intent;
@@ -253,6 +285,14 @@ app.post(
       
             const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
               expand: ["payment_method"],
+            });
+            console.log("setup intent retrieved", {
+              setupIntentId: setupIntent.id,
+              customerId: setupIntent.customer || null,
+              paymentMethodId:
+                typeof setupIntent.payment_method === "string"
+                  ? setupIntent.payment_method
+                  : setupIntent.payment_method?.id || null,
             });
       
             const customerId = setupIntent.customer;
@@ -268,17 +308,21 @@ app.post(
             };
       
             if (ghlContactId) {
+              console.log("ghl contact update start", { ghlContactId });
               await updateHighLevelContact(ghlContactId, payload);
+              console.log("ghl contact update done", { ghlContactId });
       
               try {
+                console.log("ghl opportunity upsert start", { ghlContactId });
                 await upsertHighLevelOpportunity({
                   contactId: ghlContactId,
                   pipelineId: process.env.GHL_WA_BOT_WEBINAR_PIPELINE_ID,
                   pipelineStageId:
                     process.env.GHL_WA_BOT_WEBINAR_CARD_ON_FILE_STAGE_ID,
                 });
+                console.log("ghl opportunity upsert done", { ghlContactId });
               } catch (oppErr) {
-                console.error("Opportunity update failed:", oppErr);
+                console.error("Opportunity update failed:", serializeError(oppErr));
               }
             } else {
               console.log("No ghlContactId found");
@@ -346,14 +390,27 @@ app.post(
           console.log(`Unhandled event type: ${event.type}`);
       }
 
+      console.log("webhook dedupe complete mark start", { dedupeKey });
       await redis.set(dedupeKey, "done", {
         ex: 60 * 60 * 24 * 7,
       });
+      console.log("webhook dedupe complete mark done", { dedupeKey });
 
       res.json({ received: true });
     } catch (err) {
-      await redis.del(dedupeKey);
-      console.error("Webhook handler failed:", err);
+      if (dedupeKey) {
+        try {
+          console.log("webhook dedupe cleanup start", { dedupeKey });
+          await redis.del(dedupeKey);
+          console.log("webhook dedupe cleanup done", { dedupeKey });
+        } catch (cleanupErr) {
+          console.error("Webhook dedupe cleanup failed", {
+            dedupeKey,
+            error: serializeError(cleanupErr),
+          });
+        }
+      }
+      console.error("Webhook handler failed:", serializeError(err));
       return res.status(500).json({ error: "Webhook handler failed" });
     }
   }
