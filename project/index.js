@@ -11,6 +11,19 @@ const express = require("express");
 const cors = require("cors");
 const Stripe = require("stripe");
 
+const GHL_API_BASE_URL = "https://services.leadconnectorhq.com";
+const NETWORK_RETRYABLE_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
 // Helper functions
 function normalizePhone(phone) {
   if (!phone) return "";
@@ -20,6 +33,96 @@ function normalizePhone(phone) {
 function formatStripeAmount(amount, currency) {
   if (amount === undefined || amount === null) return "";
   return String(amount); // store raw minor-unit value in GHL
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableNetworkError(err) {
+  return NETWORK_RETRYABLE_ERROR_CODES.has(err?.cause?.code) ||
+    NETWORK_RETRYABLE_ERROR_CODES.has(err?.code);
+}
+
+async function parseResponseBody(response) {
+  const rawBody = await response.text();
+
+  if (!rawBody) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return rawBody;
+  }
+}
+
+async function fetchJsonWithRetry(url, options = {}, config = {}) {
+  const {
+    retries = 2,
+    timeoutMs = 15000,
+    retryOnStatuses = [408, 409, 425, 429, 500, 502, 503, 504],
+    operation = "HTTP request",
+  } = config;
+
+  let lastError;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      const data = await parseResponseBody(response);
+
+      if (response.ok) {
+        return { response, data };
+      }
+
+      const error = new Error(
+        `${operation} failed with status ${response.status}`
+      );
+      error.status = response.status;
+      error.data = data;
+
+      if (
+        attempt < retries &&
+        retryOnStatuses.includes(response.status)
+      ) {
+        await sleep(250 * (attempt + 1));
+        continue;
+      }
+
+      throw error;
+    } catch (err) {
+      lastError = err;
+
+      if (attempt < retries && isRetryableNetworkError(err)) {
+        console.warn(`${operation} network error, retrying`, {
+          attempt: attempt + 1,
+          url,
+          message: err.message,
+          cause: err.cause?.code || err.code || null,
+        });
+        await sleep(250 * (attempt + 1));
+        continue;
+      }
+
+      break;
+    }
+  }
+
+  console.error(`${operation} failed`, {
+    url,
+    message: lastError?.message,
+    status: lastError?.status || null,
+    cause: lastError?.cause?.code || lastError?.code || null,
+    data: lastError?.data || null,
+  });
+
+  throw lastError;
 }
 
 async function handleSuccessfulPaymentSession(session) {
@@ -114,13 +217,10 @@ app.post(
       console.error("Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
-    console.log('event', event);
-
     let dedupeKey;
 
     try {
-
-      const dedupeKey = `stripe:event:${event.id}`; 
+      dedupeKey = `stripe:event:${event.id}`;
       const existingStatus = await redis.get(dedupeKey);
 
       if (existingStatus === "done") {
@@ -302,8 +402,8 @@ async function updateHighLevelContact(ghlContactId, fields) {
     });
   }
 
-  const response = await fetch(
-    `https://services.leadconnectorhq.com/contacts/${ghlContactId}`,
+  const { data } = await fetchJsonWithRetry(
+    `${GHL_API_BASE_URL}/contacts/${ghlContactId}`,
     {
       method: "PUT",
       headers: {
@@ -315,17 +415,12 @@ async function updateHighLevelContact(ghlContactId, fields) {
       body: JSON.stringify({
         customFields,
       }),
+    },
+    {
+      operation: `GHL contact update for ${ghlContactId}`,
     }
   );
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error("GHL update failed:", data);
-    throw new Error(data.message || "Failed to update GHL contact");
-  }
-
-  // console.log("GHL contact updated:", data);
   return data;
 }
 
@@ -546,8 +641,8 @@ app.get("/start-card-setup-recovery", async (req, res) => {
 
 app.get("/ghl/custom-fields", async (req, res) => {
   try {
-    const response = await fetch(
-      `https://services.leadconnectorhq.com/locations/${process.env.GHL_LOCATION_ID}/customFields`,
+    const { data } = await fetchJsonWithRetry(
+      `${GHL_API_BASE_URL}/locations/${process.env.GHL_LOCATION_ID}/customFields`,
       {
         method: "GET",
         headers: {
@@ -555,10 +650,11 @@ app.get("/ghl/custom-fields", async (req, res) => {
           Version: "2021-07-28",
           Accept: "application/json",
         },
+      },
+      {
+        operation: "GHL custom fields fetch",
       }
     );
-
-    const data = await response.json();
     res.json(data);
   } catch (err) {
     console.error("Error fetching custom fields:", err);
@@ -567,8 +663,8 @@ app.get("/ghl/custom-fields", async (req, res) => {
 });
 
 async function getHighLevelContact(ghlContactId) {
-  const response = await fetch(
-    `https://services.leadconnectorhq.com/contacts/${ghlContactId}`,
+  const { data } = await fetchJsonWithRetry(
+    `${GHL_API_BASE_URL}/contacts/${ghlContactId}`,
     {
       method: "GET",
       headers: {
@@ -576,22 +672,18 @@ async function getHighLevelContact(ghlContactId) {
         Version: "2021-07-28",
         Accept: "application/json",
       },
+    },
+    {
+      operation: `GHL contact fetch for ${ghlContactId}`,
     }
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error("Failed to fetch GHL contact:", data);
-    throw new Error(data.message || "Failed to fetch GHL contact");
-  }
 
   return data.contact || data;
 }
 
 async function getHighLevelContactPaymentData(ghlContactId) {
-  const response = await fetch(
-    `https://services.leadconnectorhq.com/contacts/${ghlContactId}`,
+  const { data } = await fetchJsonWithRetry(
+    `${GHL_API_BASE_URL}/contacts/${ghlContactId}`,
     {
       method: "GET",
       headers: {
@@ -599,15 +691,11 @@ async function getHighLevelContactPaymentData(ghlContactId) {
         Version: "2021-07-28",
         Accept: "application/json",
       },
+    },
+    {
+      operation: `GHL payment data fetch for ${ghlContactId}`,
     }
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error("Failed to fetch GHL contact:", data);
-    throw new Error(data.message || "Failed to fetch GHL contact");
-  }
 
   const contact = data.contact || data;
   const customFields = contact.customFields || [];
@@ -625,8 +713,8 @@ async function getHighLevelContactPaymentData(ghlContactId) {
 }
 
 async function upsertHighLevelContact({ firstName, lastName, email, phone }) {
-  const response = await fetch(
-    "https://services.leadconnectorhq.com/contacts/upsert",
+  const { data } = await fetchJsonWithRetry(
+    `${GHL_API_BASE_URL}/contacts/upsert`,
     {
       method: "POST",
       headers: {
@@ -642,15 +730,11 @@ async function upsertHighLevelContact({ firstName, lastName, email, phone }) {
         email,
         phone,
       }),
+    },
+    {
+      operation: "GHL contact upsert",
     }
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error("GHL upsert failed:", data);
-    throw new Error(data.message || "Failed to upsert GHL contact");
-  }
 
   // console.log("GHL upsert result:", data);
 
@@ -819,8 +903,8 @@ async function upsertHighLevelOpportunity({
     body.name = opportunityName.trim();
   }
 
-  const response = await fetch(
-    "https://services.leadconnectorhq.com/opportunities/upsert",
+  const { data } = await fetchJsonWithRetry(
+    `${GHL_API_BASE_URL}/opportunities/upsert`,
     {
       method: "POST",
       headers: {
@@ -830,15 +914,11 @@ async function upsertHighLevelOpportunity({
         Accept: "application/json",
       },
       body: JSON.stringify(body),
+    },
+    {
+      operation: `GHL opportunity upsert for ${contactId}`,
     }
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error("GHL opportunity upsert failed:", data);
-    throw new Error(data.message || "Failed to upsert GHL opportunity");
-  }
 
   return data.opportunity || data;
 }
