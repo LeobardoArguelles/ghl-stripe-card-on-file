@@ -65,6 +65,44 @@ function serializeError(err) {
   };
 }
 
+async function safeRedisGet(key) {
+  try {
+    return await redis.get(key);
+  } catch (err) {
+    console.error("Redis get failed", {
+      key,
+      error: serializeError(err),
+    });
+    return null;
+  }
+}
+
+async function safeRedisSet(key, value, options) {
+  try {
+    return await redis.set(key, value, options);
+  } catch (err) {
+    console.error("Redis set failed", {
+      key,
+      value,
+      options,
+      error: serializeError(err),
+    });
+    return null;
+  }
+}
+
+async function safeRedisDel(key) {
+  try {
+    return await redis.del(key);
+  } catch (err) {
+    console.error("Redis del failed", {
+      key,
+      error: serializeError(err),
+    });
+    return null;
+  }
+}
+
 async function parseResponseBody(response) {
   const rawBody = await response.text();
 
@@ -240,11 +278,12 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
     let dedupeKey;
+    let dedupeEnabled = true;
 
     try {
       dedupeKey = `stripe:event:${event.id}`;
       console.log("webhook dedupe lookup start", { dedupeKey });
-      const existingStatus = await redis.get(dedupeKey);
+      const existingStatus = await safeRedisGet(dedupeKey);
       console.log("webhook dedupe lookup done", { dedupeKey, existingStatus });
 
       if (existingStatus === "done") {
@@ -253,13 +292,21 @@ app.post(
       }
 
       console.log("webhook dedupe lock start", { dedupeKey });
-      const lockSet = await redis.set(dedupeKey, "processing", {
+      const lockSet = await safeRedisSet(dedupeKey, "processing", {
         nx: true,
         ex: 60 * 10,
       });
       console.log("webhook dedupe lock done", { dedupeKey, lockSet });
+
+      if (lockSet === null) {
+        dedupeEnabled = false;
+        console.warn("Redis unavailable, continuing webhook without dedupe", {
+          eventId: event.id,
+          dedupeKey,
+        });
+      }
       
-      if (!lockSet && existingStatus === "processing") {
+      if (dedupeEnabled && !lockSet && existingStatus === "processing") {
         console.log("Webhook already processing:", event.id);
         return res.json({ received: true, processing: true });
       }
@@ -390,25 +437,20 @@ app.post(
           console.log(`Unhandled event type: ${event.type}`);
       }
 
-      console.log("webhook dedupe complete mark start", { dedupeKey });
-      await redis.set(dedupeKey, "done", {
-        ex: 60 * 60 * 24 * 7,
-      });
-      console.log("webhook dedupe complete mark done", { dedupeKey });
+      if (dedupeEnabled) {
+        console.log("webhook dedupe complete mark start", { dedupeKey });
+        await safeRedisSet(dedupeKey, "done", {
+          ex: 60 * 60 * 24 * 7,
+        });
+        console.log("webhook dedupe complete mark done", { dedupeKey });
+      }
 
       res.json({ received: true });
     } catch (err) {
-      if (dedupeKey) {
-        try {
-          console.log("webhook dedupe cleanup start", { dedupeKey });
-          await redis.del(dedupeKey);
-          console.log("webhook dedupe cleanup done", { dedupeKey });
-        } catch (cleanupErr) {
-          console.error("Webhook dedupe cleanup failed", {
-            dedupeKey,
-            error: serializeError(cleanupErr),
-          });
-        }
+      if (dedupeKey && dedupeEnabled) {
+        console.log("webhook dedupe cleanup start", { dedupeKey });
+        await safeRedisDel(dedupeKey);
+        console.log("webhook dedupe cleanup done", { dedupeKey });
       }
       console.error("Webhook handler failed:", serializeError(err));
       return res.status(500).json({ error: "Webhook handler failed" });
@@ -546,12 +588,20 @@ app.post("/start-card-setup", async (req, res) => {
     // 4) Create Stripe Checkout Session
     const consentTimestamp = new Date().toISOString();
 
+    // Construir success_url con todos los datos del contacto
+    const successUrl = new URL(process.env.SUCCESS_URL);
+    successUrl.searchParams.set('contact_id', ghlContactId);
+    successUrl.searchParams.set('first_name', name || '');
+    successUrl.searchParams.set('last_name', last_name || '');
+    successUrl.searchParams.set('email', email || '');
+    successUrl.searchParams.set('phone', normalizedPhone || '');
+
     const session = await stripe.checkout.sessions.create({
       mode: "setup",
       customer: customerId,
       currency: "mxn",
       locale: "es-419",
-      success_url: process.env.SUCCESS_URL,
+      success_url: successUrl.toString(),
       cancel_url: process.env.CANCEL_URL,
       metadata: {
         ghl_contact_id: ghlContactId,
@@ -642,13 +692,19 @@ app.get("/start-card-setup-recovery", async (req, res) => {
 
     // 4) Create setup checkout session
     const consentTimestamp = new Date().toISOString();
+    const successUrl = new URL(process.env.SUCCESS_URL);
+    successUrl.searchParams.set('contact_id', ghlContactId);
+    successUrl.searchParams.set('first_name', firstName || '');
+    successUrl.searchParams.set('last_name', lastName || '');
+    successUrl.searchParams.set('email', email || '');
+    successUrl.searchParams.set('phone', phone || '');
 
     const session = await stripe.checkout.sessions.create({
       mode: "setup",
       customer: customerId,
       currency: "mxn",
       locale: locale || "es-419",
-      success_url: finalSuccessUrl,
+      success_url: successUrl.toString(),
       cancel_url: finalCancelUrl,
       metadata: {
         ghl_contact_id: ghlContact.id,
@@ -693,6 +749,113 @@ app.get("/start-card-setup-recovery", async (req, res) => {
   } catch (err) {
     console.error("Error in /start-card-setup-recovery:", err);
     return res.status(500).send(err.message || "Failed to start recovery card setup flow");
+  }
+});
+
+app.post("/upsert-and-redirect", async (req, res) => {
+  try {
+    const {
+      name,
+      last_name,
+      email,
+      whatsapp,
+      country_code,
+      destination_url,
+      consent,
+      consent_text_version,
+      extra_params = {},
+    } = req.body;
+
+    if (!destination_url) {
+      return res.status(400).json({ error: "destination_url is required" });
+    }
+
+    if (!name || !email) {
+      return res.status(400).json({
+        error: "name and email are required",
+      });
+    }
+
+    // Validación básica del destino — solo permitimos dominios propios
+    const allowedHosts = (process.env.ALLOWED_REDIRECT_HOSTS || "")
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean);
+
+    let destUrl;
+    try {
+      destUrl = new URL(destination_url);
+    } catch {
+      return res.status(400).json({ error: "destination_url is not a valid URL" });
+    }
+
+    if (allowedHosts.length && !allowedHosts.includes(destUrl.hostname.toLowerCase())) {
+      return res.status(400).json({
+        error: `destination_url host not allowed: ${destUrl.hostname}`,
+      });
+    }
+
+    const fullPhone = `${country_code || ""}${whatsapp || ""}`;
+    const normalizedPhone = normalizePhone(fullPhone);
+
+    // 1) Upsert en GHL
+    const contact = await upsertHighLevelContact({
+      firstName: name,
+      lastName: last_name || "",
+      email,
+      phone: normalizedPhone,
+    });
+
+    const ghlContactId = contact.id;
+    if (!ghlContactId) {
+      throw new Error("GHL upsert did not return a contact ID");
+    }
+
+    // 2) Opportunity en pipeline (igual que en /start-card-setup)
+    try {
+      await upsertHighLevelOpportunity({
+        contactId: ghlContactId,
+        opportunityName:
+          `${name || ""} ${last_name || ""}`.trim() || "New Lead",
+      });
+    } catch (oppErr) {
+      console.error("Opportunity creation failed in upsert-and-redirect:", oppErr);
+    }
+
+    // 3) Guardar consent si vino
+    if (consent) {
+      try {
+        await updateHighLevelContact(ghlContactId, {
+          consent_given: "true",
+          consent_timestamp: new Date().toISOString(),
+          consent_version: consent_text_version || "v1",
+        });
+      } catch (consentErr) {
+        console.error("Consent update failed:", consentErr);
+      }
+    }
+
+    // 4) Construir URL final con contact_id + datos GHL-standard + extras
+    destUrl.searchParams.set("contact_id", ghlContactId);
+    destUrl.searchParams.set("first_name", name || "");
+    destUrl.searchParams.set("last_name", last_name || "");
+    destUrl.searchParams.set("email", email || "");
+    destUrl.searchParams.set("phone", normalizedPhone || "");
+
+    // Params adicionales (UTMs, IDs internos, etc.)
+    for (const [key, value] of Object.entries(extra_params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        destUrl.searchParams.set(key, String(value));
+      }
+    }
+
+    // 5) Redirect
+    return res.redirect(303, destUrl.toString());
+  } catch (err) {
+    console.error("Error in /upsert-and-redirect:", err);
+    return res.status(500).json({
+      error: err.message || "Failed to upsert and redirect",
+    });
   }
 });
 
