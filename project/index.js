@@ -638,17 +638,16 @@ app.post("/start-card-setup", async (req, res) => {
   }
 });
 
-app.get("/start-card-setup-recovery", async (req, res) => {
+async function startCardSetupRecovery(req, res, contactId) {
   try {
     const {
-      contact_id,
       success_url,
       cancel_url,
       locale,
       consent_text_version,
     } = req.query;
 
-    if (!contact_id) {
+    if (!contactId) {
       return res.status(400).send("Missing contact_id");
     }
 
@@ -660,7 +659,7 @@ app.get("/start-card-setup-recovery", async (req, res) => {
     }
 
     // 1) Fetch contact from GHL
-    const ghlContact = await getHighLevelContact(contact_id);
+    const ghlContact = await getHighLevelContact(contactId);
 
     if (!ghlContact?.id) {
       return res.status(404).send("GHL contact not found");
@@ -692,8 +691,8 @@ app.get("/start-card-setup-recovery", async (req, res) => {
 
     // 4) Create setup checkout session
     const consentTimestamp = new Date().toISOString();
-    const successUrl = new URL(process.env.SUCCESS_URL);
-    successUrl.searchParams.set('contact_id', ghlContactId);
+    const successUrl = new URL(finalSuccessUrl);
+    successUrl.searchParams.set('contact_id', ghlContact.id);
     successUrl.searchParams.set('first_name', firstName || '');
     successUrl.searchParams.set('last_name', lastName || '');
     successUrl.searchParams.set('email', email || '');
@@ -750,6 +749,14 @@ app.get("/start-card-setup-recovery", async (req, res) => {
     console.error("Error in /start-card-setup-recovery:", err);
     return res.status(500).send(err.message || "Failed to start recovery card setup flow");
   }
+}
+
+app.get("/start-card-setup-recovery", async (req, res) => {
+  return startCardSetupRecovery(req, res, req.query.contact_id);
+});
+
+app.get("/start-card-setup-recovery/:contact_id", async (req, res) => {
+  return startCardSetupRecovery(req, res, req.params.contact_id);
 });
 
 app.post("/upsert-and-redirect", async (req, res) => {
