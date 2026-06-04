@@ -65,6 +65,33 @@ function serializeError(err) {
   };
 }
 
+function getEntryPointOpportunityConfig(entryPoint) {
+  const normalizedEntryPoint = String(entryPoint || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+
+  const configs = {
+    pay_later: {
+      pipelineStageId:
+        process.env.GHL_WA_BOT_WEBINAR_PAY_LATER_ENTRY_STAGE_ID ||
+        process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
+      source: "landing_pay_later",
+    },
+    pay_now: {
+      pipelineStageId:
+        process.env.GHL_WA_BOT_WEBINAR_PAY_NOW_ENTRY_STAGE_ID ||
+        process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
+      source: "landing_pay_now",
+    },
+  };
+
+  return configs[normalizedEntryPoint] || {
+    pipelineStageId: process.env.GHL_WA_BOT_WEBINAR_NEW_LEAD_STAGE_ID,
+    source: "custom_form",
+  };
+}
+
 async function safeRedisGet(key) {
   try {
     return await redis.get(key);
@@ -525,7 +552,7 @@ async function updateHighLevelContact(ghlContactId, fields) {
 
 app.post("/start-card-setup", async (req, res) => {
   try {
-    const { name, last_name, email, whatsapp, country_code, consent, consent_text_version } = req.body;
+    const { name, last_name, email, whatsapp, country_code, consent, consent_text_version, entry_point } = req.body;
 
     if (!consent) {
       return res.status(400).json({
@@ -557,10 +584,14 @@ app.post("/start-card-setup", async (req, res) => {
     }
 
     // 1.5) Add/update opportunity in pipeline
+    const opportunityConfig = getEntryPointOpportunityConfig(entry_point);
+
     try {
       await upsertHighLevelOpportunity({
         contactId: ghlContactId,
-	opportunityName: `${name || ""} ${last_name || ""}`.trim() || "New Lead",
+        pipelineStageId: opportunityConfig.pipelineStageId,
+        source: opportunityConfig.source,
+        opportunityName: `${name || ""} ${last_name || ""}`.trim() || "New Lead",
       });
     } catch (oppErr) {
       console.error("Opportunity creation failed:", oppErr);
@@ -606,6 +637,7 @@ app.post("/start-card-setup", async (req, res) => {
       metadata: {
         ghl_contact_id: ghlContactId,
         source: "gohighlevel",
+        entry_point: entry_point || "start_card_setup",
         purpose: "save_card_for_future_charge",
         consent: "true",
         consent_text_version: consent_text_version || "v1",
@@ -615,6 +647,7 @@ app.post("/start-card-setup", async (req, res) => {
         metadata: {
           ghl_contact_id: ghlContactId,
           source: "gohighlevel",
+          entry_point: entry_point || "start_card_setup",
         },
       },
     });
@@ -770,6 +803,7 @@ app.post("/upsert-and-redirect", async (req, res) => {
       destination_url,
       consent,
       consent_text_version,
+      entry_point,
       extra_params = {},
     } = req.body;
 
@@ -819,9 +853,13 @@ app.post("/upsert-and-redirect", async (req, res) => {
     }
 
     // 2) Opportunity en pipeline (igual que en /start-card-setup)
+    const opportunityConfig = getEntryPointOpportunityConfig(entry_point);
+
     try {
       await upsertHighLevelOpportunity({
         contactId: ghlContactId,
+        pipelineStageId: opportunityConfig.pipelineStageId,
+        source: opportunityConfig.source,
         opportunityName:
           `${name || ""} ${last_name || ""}`.trim() || "New Lead",
       });
